@@ -77,7 +77,10 @@ class ZWaveAgent(IJarvisAgent):
     def _get_service(self) -> Any:
         """Lazily create the ZWaveService instance."""
         if self._service is None:
-            from device_families.custom_families.zwave.zwave_service import ZWaveService
+            try:
+                from device_families.custom_families.zwave.zwave_service import ZWaveService
+            except ImportError:
+                from device_families.zwave.zwave_service import ZWaveService
 
             self._service = ZWaveService()
         return self._service
