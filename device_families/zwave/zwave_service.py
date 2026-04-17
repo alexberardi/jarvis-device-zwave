@@ -165,13 +165,16 @@ class ZWaveService:
             return
         self._initialized: bool = True
 
-        self._url: str | None = _storage.get_secret("ZWAVE_JS_URL")
-
         # Node cache: node_id → raw node data from Z-Wave JS Server
         self._nodes: dict[int, dict[str, Any]] = {}
         self._last_refresh: datetime | None = None
         self._last_error: str | None = None
         self._msg_counter: int = 0
+
+    @staticmethod
+    def _get_url() -> str | None:
+        """Read the Z-Wave JS Server URL fresh each time (secret may be set after init)."""
+        return _storage.get_secret("ZWAVE_JS_URL")
 
     def _next_msg_id(self) -> str:
         self._msg_counter += 1
@@ -187,7 +190,8 @@ class ZWaveService:
 
     async def fetch_nodes(self) -> None:
         """Connect to Z-Wave JS Server and fetch all nodes via start_listening."""
-        if not self._url:
+        url: str | None = self._get_url()
+        if not url:
             self._last_error = "ZWAVE_JS_URL not configured"
             logger.warning("Z-Wave fetch skipped", reason=self._last_error)
             return
@@ -201,7 +205,7 @@ class ZWaveService:
 
         try:
             async with websockets.connect(
-                self._url, max_size=_MAX_WS_SIZE, close_timeout=5,
+                url, max_size=_MAX_WS_SIZE, close_timeout=5,
             ) as ws:
                 # 1. Read version handshake
                 version_msg: dict[str, Any] = json.loads(
@@ -252,10 +256,10 @@ class ZWaveService:
 
         except asyncio.TimeoutError:
             self._last_error = "Connection timeout"
-            logger.error("Z-Wave JS Server connection timeout", url=self._url)
+            logger.error("Z-Wave JS Server connection timeout")
         except ConnectionRefusedError:
             self._last_error = "Connection refused — is Z-Wave JS Server running?"
-            logger.error("Z-Wave JS Server connection refused", url=self._url)
+            logger.error("Z-Wave JS Server connection refused")
         except Exception as e:
             self._last_error = str(e)
             logger.error("Z-Wave fetch error", error=str(e))
@@ -282,7 +286,8 @@ class ZWaveService:
         Returns:
             True on success, False on failure.
         """
-        if not self._url:
+        url: str | None = self._get_url()
+        if not url:
             logger.error("ZWAVE_JS_URL not configured")
             return False
 
@@ -302,7 +307,7 @@ class ZWaveService:
 
         try:
             async with websockets.connect(
-                self._url, max_size=_MAX_WS_SIZE, close_timeout=5,
+                url, max_size=_MAX_WS_SIZE, close_timeout=5,
             ) as ws:
                 # Handshake: version → initialize
                 version_msg = json.loads(
