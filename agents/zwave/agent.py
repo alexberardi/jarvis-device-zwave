@@ -87,8 +87,14 @@ class ZWaveAgent(IJarvisAgent):
 
     async def run(self) -> None:
         """Fetch node data from Z-Wave JS UI."""
-        service = self._get_service()
-        await service.fetch_nodes()
+        logger.info("ZWaveAgent.run() starting")
+        try:
+            service = self._get_service()
+            await service.fetch_nodes()
+            nodes = service.get_all_nodes()
+            logger.info("ZWaveAgent.run() complete", cached_nodes=len(nodes), last_error=service._last_error)
+        except Exception as e:
+            logger.error("ZWaveAgent.run() failed", error=str(e), error_type=type(e).__name__)
 
     def get_context_data(self) -> Dict[str, Any]:
         """Return cached Z-Wave data for voice request context."""

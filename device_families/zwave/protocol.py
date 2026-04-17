@@ -43,6 +43,19 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
+def _parse_node_id_from_entity(entity_id: str) -> int | None:
+    """Extract Z-Wave node ID from entity_id (e.g., 'zw6hd_2' → 2).
+
+    Entity IDs are created as '{slugified_name}_{node_id}' by discover().
+    """
+    try:
+        suffix: str = entity_id.rsplit("_", 1)[-1]
+        return int(suffix)
+    except (ValueError, IndexError):
+        logger.warning("Could not parse node_id from entity_id", entity_id=entity_id)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Action → Z-Wave CC mapping
 # ---------------------------------------------------------------------------
@@ -255,15 +268,32 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
         ]
 
     async def discover(self, timeout: int = 5) -> list[DiscoveredDevice]:
-        from .zwave_service import ZWaveService, classify_node
+        logger.info("Z-Wave discover() called", timeout=timeout)
+
+        try:
+            from .zwave_service import ZWaveService, classify_node
+            logger.debug("Z-Wave service import OK")
+        except ImportError as e:
+            logger.error("Z-Wave service import failed", error=str(e))
+            return []
 
         service: ZWaveService = ZWaveService()
+        logger.debug(
+            "ZWaveService state before refresh",
+            cached_nodes=len(service.get_all_nodes()),
+            last_error=service._last_error,
+        )
+
         await service.refresh_if_stale(max_age_seconds=0)  # Force fresh data
 
+        all_nodes: dict[int, Any] = service.get_all_nodes()
+        logger.info("Z-Wave nodes after refresh", node_count=len(all_nodes), last_error=service._last_error)
+
         devices: list[DiscoveredDevice] = []
-        for node_id, node in service.get_all_nodes().items():
+        for node_id, node in all_nodes.items():
             domain: str | None = classify_node(node)
             if domain is None:
+                logger.debug("Z-Wave node skipped (no domain)", node_id=node_id, is_controller=node.get("isControllerNode"))
                 continue
 
             name: str = node.get("name") or node.get("label") or f"Node {node_id}"
@@ -285,17 +315,20 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
                     },
                 )
             )
+            logger.debug("Z-Wave device discovered", node_id=node_id, name=name, domain=domain)
 
-        logger.info(f"Z-Wave discovery found {len(devices)} device(s)")
+        logger.info(f"Z-Wave discovery complete: {len(devices)} device(s) from {len(all_nodes)} node(s)")
         return devices
 
     async def control(
         self, device: DiscoveredDevice, action: str, params: dict[str, Any] | None = None,
     ) -> DeviceControlResult:
-        from .zwave_service import ZWaveService
+        from .zwave_service import ZWaveService, classify_node
 
         service: ZWaveService = ZWaveService()
-        node_id: int | None = device.extra.get("node_id")
+        node_id: int | None = device.extra.get("node_id") if device.extra else None
+        if node_id is None:
+            node_id = _parse_node_id_from_entity(device.entity_id)
         if node_id is None:
             return DeviceControlResult(
                 success=False, entity_id=device.entity_id, action=action,
@@ -305,8 +338,16 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
         # Read cached node for toggle/thermostat logic
         node: dict[str, Any] | None = service.get_node(node_id)
 
+        # Use classified domain from node cache (CC may not send domain in context)
+        domain: str = device.domain
+        if node and domain == "switch":
+            classified: str | None = classify_node(node)
+            if classified:
+                domain = classified
+                logger.debug("Domain resolved from node cache", node_id=node_id, domain=domain)
+
         resolved: tuple[int, int, str, Any, int | str | None] | None = _resolve_action(
-            device.domain, action, params, node,
+            domain, action, params, node,
         )
         if resolved is None:
             return DeviceControlResult(
@@ -328,7 +369,9 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
         from .zwave_service import ZWaveService
 
         service: ZWaveService = ZWaveService()
-        node_id: int | None = device.extra.get("node_id")
+        node_id: int | None = device.extra.get("node_id") if device.extra else None
+        if node_id is None:
+            node_id = _parse_node_id_from_entity(device.entity_id)
         if node_id is None:
             return {"error": "Missing node_id in device data"}
 
