@@ -1,0 +1,30 @@
+name: "zwave"
+display_name: "Z-Wave (via Z-Wave JS UI)"
+description: "Z-Wave device control via Z-Wave JS UI. Discovers and controls switches, lights, locks, thermostats, and covers over your Z-Wave mesh."
+version: "1.0.0"
+min_jarvis_version: "0.9.0"
+license: "MIT"
+author:
+  github: "alexberardi"
+categories: ["smart-home"]
+platforms: ["darwin", "linux"]
+keywords: ["zwave", "z-wave", "zwavejs", "smart home", "switch", "lock", "thermostat"]
+
+components:
+  - type: device_protocol
+    name: zwave
+    path: device_families/zwave/protocol.py
+  - type: agent
+    name: zwave
+    path: agents/zwave/agent.py
+
+packages:
+  - name: "python-socketio[asyncio_client]"
+
+secrets:
+  - key: ZWAVE_JS_URL
+    scope: integration
+    value_type: string
+    description: "Z-Wave JS UI URL (e.g., http://10.0.0.244:8091)"
+    is_sensitive: false
+    friendly_name: "Z-Wave JS UI URL"
