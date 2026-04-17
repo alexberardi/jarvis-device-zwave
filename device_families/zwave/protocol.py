@@ -239,6 +239,7 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
                 "ZWAVE_JS_URL",
                 "Z-Wave JS Server WebSocket URL (e.g., ws://10.0.0.244:3000)",
                 "integration", "string",
+                required=False,
                 is_sensitive=False,
                 friendly_name="Z-Wave JS Server URL",
             ),
