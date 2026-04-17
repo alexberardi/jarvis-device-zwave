@@ -66,10 +66,10 @@ class ZWaveAgent(IJarvisAgent):
         return [
             JarvisSecret(
                 "ZWAVE_JS_URL",
-                "Z-Wave JS UI URL (e.g., http://10.0.0.244:8091)",
+                "Z-Wave JS Server WebSocket URL (e.g., ws://10.0.0.244:3000)",
                 "integration", "string",
                 is_sensitive=False,
-                friendly_name="Z-Wave JS UI URL",
+                friendly_name="Z-Wave JS Server URL",
             ),
         ]
 

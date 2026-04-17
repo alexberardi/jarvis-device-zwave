@@ -1,4 +1,4 @@
-"""Z-Wave device protocol adapter via Z-Wave JS UI."""
+"""Z-Wave device protocol adapter via Z-Wave JS Server WebSocket API."""
 
 from __future__ import annotations
 
@@ -113,42 +113,42 @@ def _resolve_action(
     return None
 
 
+def _iter_values(node: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Get node values as a list (API returns list, older versions may return dict)."""
+    if not node:
+        return []
+    values: Any = node.get("values", [])
+    if isinstance(values, list):
+        return values
+    if isinstance(values, dict):
+        return list(values.values())
+    return []
+
+
 def _read_current_bool(node: dict[str, Any] | None, cc: int) -> bool:
     """Read a boolean currentValue from cached node data."""
-    if not node:
-        return False
-    values: dict[str, Any] = node.get("values", {})
-    if isinstance(values, dict):
-        for val in values.values():
-            if val.get("commandClass") == cc and val.get("property") == "currentValue":
-                return bool(val.get("value", False))
+    for val in _iter_values(node):
+        if val.get("commandClass") == cc and val.get("property") == "currentValue":
+            return bool(val.get("value", False))
     return False
 
 
 def _read_current_level(node: dict[str, Any] | None, cc: int) -> int:
     """Read an integer currentValue from cached node data."""
-    if not node:
-        return 0
-    values: dict[str, Any] = node.get("values", {})
-    if isinstance(values, dict):
-        for val in values.values():
-            if val.get("commandClass") == cc and val.get("property") == "currentValue":
-                return int(val.get("value", 0))
+    for val in _iter_values(node):
+        if val.get("commandClass") == cc and val.get("property") == "currentValue":
+            return int(val.get("value", 0))
     return 0
 
 
 def _find_setpoint_key(node: dict[str, Any] | None) -> int | str | None:
     """Find the first thermostat setpoint property key (Heating=1, Cooling=2)."""
-    if not node:
-        return 1  # Default to Heating
-    values: dict[str, Any] = node.get("values", {})
-    if isinstance(values, dict):
-        for val in values.values():
-            if val.get("commandClass") == 67 and val.get("property") == "setpoint":
-                pk: Any = val.get("propertyKey")
-                if pk is not None:
-                    return pk
-    return 1
+    for val in _iter_values(node):
+        if val.get("commandClass") == 67 and val.get("property") == "setpoint":
+            pk: Any = val.get("propertyKey")
+            if pk is not None:
+                return pk
+    return 1  # Default to Heating
 
 
 # ---------------------------------------------------------------------------
@@ -157,13 +157,10 @@ def _find_setpoint_key(node: dict[str, Any] | None) -> int | str | None:
 
 def _extract_state(node: dict[str, Any], domain: str) -> dict[str, Any]:
     """Extract device state from cached node values."""
-    values: dict[str, Any] = node.get("values", {})
-    if not isinstance(values, dict):
-        return {"state": "unknown"}
-
+    values: list[dict[str, Any]] = _iter_values(node)
     state: dict[str, Any] = {}
 
-    for val in values.values():
+    for val in values:
         cc: int | None = val.get("commandClass")
         prop: str = val.get("property", "")
         v: Any = val.get("value")
@@ -208,8 +205,8 @@ def _extract_state(node: dict[str, Any], domain: str) -> dict[str, Any]:
             state["battery"] = v
 
     if "state" not in state:
-        node_status: str = node.get("status", "unknown")
-        state["state"] = "offline" if node_status == "dead" else "unknown"
+        status: Any = node.get("status")
+        state["state"] = "offline" if status == 0 else "unknown"
 
     return state
 
@@ -219,7 +216,7 @@ def _extract_state(node: dict[str, Any], domain: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class ZWaveProtocol(IJarvisDeviceProtocol):
-    """Z-Wave device protocol via Z-Wave JS UI socket.io API."""
+    """Z-Wave device protocol via Z-Wave JS Server WebSocket API."""
 
     protocol_name: str = "zwave"
     friendly_name: str = "Z-Wave"
@@ -230,19 +227,20 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
 
 1. Install a Z-Wave USB stick (e.g., Zooz ZST39, Aeotec Z-Stick 7)
 2. Run **Z-Wave JS UI** as a container with the USB stick passed through
-3. Pair your Z-Wave devices using the Z-Wave JS UI web interface
-4. Set the **Z-Wave JS UI URL** below (e.g., `http://10.0.0.244:8091`)
-5. Tap **Scan for Devices** to discover paired devices"""
+3. Enable the **WS Server** in Z-Wave JS UI settings (default port 3000)
+4. Pair your Z-Wave devices using the Z-Wave JS UI web interface
+5. Set the **Z-Wave JS Server URL** below (e.g., `ws://10.0.0.244:3000`)
+6. Tap **Scan for Devices** to discover paired devices"""
 
     @property
     def required_secrets(self) -> list[IJarvisSecret]:
         return [
             JarvisSecret(
                 "ZWAVE_JS_URL",
-                "Z-Wave JS UI URL (e.g., http://10.0.0.244:8091)",
+                "Z-Wave JS Server WebSocket URL (e.g., ws://10.0.0.244:3000)",
                 "integration", "string",
                 is_sensitive=False,
-                friendly_name="Z-Wave JS UI URL",
+                friendly_name="Z-Wave JS Server URL",
             ),
         ]
 
@@ -267,8 +265,8 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
             if domain is None:
                 continue
 
-            name: str = node.get("name") or node.get("productLabel") or f"Node {node_id}"
-            location: str = node.get("loc", "")
+            name: str = node.get("name") or node.get("label") or f"Node {node_id}"
+            location: str = node.get("location", "")
 
             devices.append(
                 DiscoveredDevice(
@@ -277,7 +275,7 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
                     domain=domain,
                     protocol=self.protocol_name,
                     manufacturer=node.get("manufacturer", ""),
-                    model=node.get("productLabel", ""),
+                    model=node.get("label", ""),
                     extra={
                         "node_id": node_id,
                         "location": location,
@@ -316,7 +314,7 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
             )
 
         cc, endpoint, prop, value, prop_key = resolved
-        success: bool = await service.write_value(
+        success: bool = await service.set_value(
             node_id, cc, endpoint, prop, value, property_key=prop_key,
         )
 

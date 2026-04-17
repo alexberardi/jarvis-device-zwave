@@ -1,12 +1,14 @@
-"""Z-Wave JS UI service — singleton client for device data and control.
+"""Z-Wave JS Server service — singleton WebSocket client for device data and control.
 
-Connects to Z-Wave JS UI's socket.io API to fetch node data and
-send control commands. Cache is refreshed by the ZWaveAgent on a timer.
+Connects to Z-Wave JS Server's WebSocket API (port 3000 by default, enabled
+in Z-Wave JS UI settings) to fetch node data and send control commands.
+Cache is refreshed by the ZWaveAgent on a timer.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -46,8 +48,14 @@ logger = JarvisLogger(service="device.zwave")
 # Default cache staleness: 5 minutes
 _DEFAULT_MAX_AGE_SECONDS: int = 300
 
-# Socket.io timeout for operations
-_SIO_TIMEOUT_SECONDS: int = 30
+# WebSocket timeout for operations
+_WS_TIMEOUT_SECONDS: int = 30
+
+# Z-Wave JS Server schema version to request
+_SCHEMA_VERSION: int = 44
+
+# Max WebSocket message size (node state dumps can be large)
+_MAX_WS_SIZE: int = 10_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -94,22 +102,29 @@ def classify_node(node: dict[str, Any]) -> str | None:
 
     # Try generic device class first
     device_class: dict[str, Any] = node.get("deviceClass", {})
-    specific: str = device_class.get("specific", {}).get("label", "")
-    generic: str = device_class.get("generic", {}).get("label", "")
+    specific_label: str = ""
+    generic_label: str = ""
 
-    for label in (specific, generic):
+    generic_raw: Any = device_class.get("generic")
+    specific_raw: Any = device_class.get("specific")
+    if isinstance(generic_raw, dict):
+        generic_label = generic_raw.get("label", "")
+    if isinstance(specific_raw, dict):
+        specific_label = specific_raw.get("label", "")
+
+    for label in (specific_label, generic_label):
         domain: str | None = _GENERIC_CLASS_TO_DOMAIN.get(label)
         if domain:
             return domain
 
     # Fall back to command classes present in values
-    values: dict[str, Any] = node.get("values", {})
+    values: Any = node.get("values", [])
     found_domains: set[str] = set()
-    if isinstance(values, dict):
-        for val in values.values():
-            cc: int | None = val.get("commandClass")
-            if cc in _CC_TO_DOMAIN:
-                found_domains.add(_CC_TO_DOMAIN[cc])
+    val_list: list[dict[str, Any]] = values if isinstance(values, list) else list(values.values()) if isinstance(values, dict) else []
+    for val in val_list:
+        cc: int | None = val.get("commandClass")
+        if cc in _CC_TO_DOMAIN:
+            found_domains.add(_CC_TO_DOMAIN[cc])
 
     for domain in _DOMAIN_PRIORITY:
         if domain in found_domains:
@@ -118,17 +133,28 @@ def classify_node(node: dict[str, Any]) -> str | None:
     return None
 
 
-class ZWaveService:
-    """Singleton service for Z-Wave JS UI communication.
+def _iter_values(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Get node values as a list regardless of whether the API returns a list or dict."""
+    values: Any = node.get("values", [])
+    if isinstance(values, list):
+        return values
+    if isinstance(values, dict):
+        return list(values.values())
+    return []
 
-    Connects to Z-Wave JS UI's socket.io API for node discovery and control.
-    Cache is populated by the ZWaveAgent on a 5-minute timer.
+
+class ZWaveService:
+    """Singleton service for Z-Wave JS Server communication.
+
+    Connects to Z-Wave JS Server's WebSocket API for node discovery and
+    control. The WS Server is enabled in Z-Wave JS UI under
+    Settings → Z-Wave JS → WS Server (default port 3000).
 
     Usage:
         service = ZWaveService()
         await service.fetch_nodes()
         nodes = service.get_all_nodes()
-        await service.write_value(5, 37, 0, "targetValue", True)
+        await service.set_value(2, 38, 0, "targetValue", 99)
     """
 
     _instance: Optional["ZWaveService"] = None
@@ -146,10 +172,15 @@ class ZWaveService:
 
         self._url: str | None = get_secret_value("ZWAVE_JS_URL", "integration")
 
-        # Node cache: node_id → raw node data from Z-Wave JS UI
+        # Node cache: node_id → raw node data from Z-Wave JS Server
         self._nodes: dict[int, dict[str, Any]] = {}
         self._last_refresh: datetime | None = None
         self._last_error: str | None = None
+        self._msg_counter: int = 0
+
+    def _next_msg_id(self) -> str:
+        self._msg_counter += 1
+        return f"jarvis-{self._msg_counter}"
 
     async def refresh_if_stale(self, max_age_seconds: int = _DEFAULT_MAX_AGE_SECONDS) -> None:
         """Re-fetch Z-Wave data if cache is older than max_age_seconds."""
@@ -160,57 +191,81 @@ class ZWaveService:
         await self.fetch_nodes()
 
     async def fetch_nodes(self) -> None:
-        """Connect to Z-Wave JS UI and fetch all nodes into cache."""
+        """Connect to Z-Wave JS Server and fetch all nodes via start_listening."""
         if not self._url:
             self._last_error = "ZWAVE_JS_URL not configured"
             logger.warning("Z-Wave fetch skipped", reason=self._last_error)
             return
 
         try:
-            import socketio
+            import websockets
         except ImportError:
-            self._last_error = "python-socketio not installed"
-            logger.error("python-socketio[asyncio_client] required for Z-Wave")
+            self._last_error = "websockets package not installed"
+            logger.error("websockets package required for Z-Wave JS Server")
             return
 
-        sio: socketio.AsyncClient = socketio.AsyncClient()
         try:
-            await asyncio.wait_for(
-                sio.connect(self._url),
-                timeout=_SIO_TIMEOUT_SECONDS,
-            )
+            async with websockets.connect(
+                self._url, max_size=_MAX_WS_SIZE, close_timeout=5,
+            ) as ws:
+                # 1. Read version handshake
+                version_msg: dict[str, Any] = json.loads(
+                    await asyncio.wait_for(ws.recv(), timeout=_WS_TIMEOUT_SECONDS)
+                )
+                logger.debug(
+                    "Z-Wave JS Server connected",
+                    server_version=version_msg.get("serverVersion"),
+                    driver_version=version_msg.get("driverVersion"),
+                )
 
-            response: Any = await asyncio.wait_for(
-                sio.call("zwave", {"api": "getNodes", "args": []}),
-                timeout=_SIO_TIMEOUT_SECONDS,
-            )
+                # 2. Initialize with schema version
+                init_id: str = self._next_msg_id()
+                await ws.send(json.dumps({
+                    "messageId": init_id,
+                    "command": "initialize",
+                    "schemaVersion": min(
+                        _SCHEMA_VERSION,
+                        version_msg.get("maxSchemaVersion", _SCHEMA_VERSION),
+                    ),
+                }))
+                init_resp: dict[str, Any] = await self._recv_for(ws, init_id)
+                if not init_resp.get("success"):
+                    raise ValueError(f"Initialize failed: {init_resp.get('message', '')}")
 
-            nodes_list: list[dict[str, Any]] = self._parse_response(response, "getNodes")
+                # 3. Start listening → full state dump
+                listen_id: str = self._next_msg_id()
+                await ws.send(json.dumps({
+                    "messageId": listen_id,
+                    "command": "start_listening",
+                }))
+                listen_resp: dict[str, Any] = await self._recv_for(ws, listen_id)
+                if not listen_resp.get("success"):
+                    raise ValueError(f"start_listening failed: {listen_resp.get('message', '')}")
 
-            self._nodes = {}
-            for node in nodes_list:
-                node_id: int | None = node.get("id")
-                if node_id is not None:
-                    self._nodes[node_id] = node
+                state: dict[str, Any] = listen_resp.get("result", {}).get("state", {})
+                nodes_list: list[dict[str, Any]] = state.get("nodes", [])
 
-            self._last_refresh = datetime.now(timezone.utc)
-            self._last_error = None
-            logger.info("Z-Wave nodes refreshed", count=len(self._nodes))
+                self._nodes = {}
+                for node in nodes_list:
+                    node_id: int | None = node.get("nodeId")
+                    if node_id is not None:
+                        self._nodes[node_id] = node
+
+                self._last_refresh = datetime.now(timezone.utc)
+                self._last_error = None
+                logger.info("Z-Wave nodes refreshed", count=len(self._nodes))
 
         except asyncio.TimeoutError:
             self._last_error = "Connection timeout"
-            logger.error("Z-Wave JS UI connection timeout", url=self._url)
+            logger.error("Z-Wave JS Server connection timeout", url=self._url)
         except ConnectionRefusedError:
-            self._last_error = "Connection refused — is Z-Wave JS UI running?"
-            logger.error("Z-Wave JS UI connection refused", url=self._url)
+            self._last_error = "Connection refused — is Z-Wave JS Server running?"
+            logger.error("Z-Wave JS Server connection refused", url=self._url)
         except Exception as e:
             self._last_error = str(e)
             logger.error("Z-Wave fetch error", error=str(e))
-        finally:
-            if sio.connected:
-                await sio.disconnect()
 
-    async def write_value(
+    async def set_value(
         self,
         node_id: int,
         command_class: int,
@@ -219,7 +274,7 @@ class ZWaveService:
         value: Any,
         property_key: int | str | None = None,
     ) -> bool:
-        """Send a setValue command to Z-Wave JS UI.
+        """Send a node.set_value command to Z-Wave JS Server.
 
         Args:
             node_id: Z-Wave node ID.
@@ -237,13 +292,12 @@ class ZWaveService:
             return False
 
         try:
-            import socketio
+            import websockets
         except ImportError:
-            logger.error("python-socketio not installed")
+            logger.error("websockets package not installed")
             return False
 
         value_id: dict[str, Any] = {
-            "nodeId": node_id,
             "commandClass": command_class,
             "endpoint": endpoint,
             "property": property_name,
@@ -251,38 +305,54 @@ class ZWaveService:
         if property_key is not None:
             value_id["propertyKey"] = property_key
 
-        sio: socketio.AsyncClient = socketio.AsyncClient()
         try:
-            await asyncio.wait_for(
-                sio.connect(self._url),
-                timeout=_SIO_TIMEOUT_SECONDS,
-            )
-
-            response: Any = await asyncio.wait_for(
-                sio.call("zwave", {"api": "writeValue", "args": [value_id, value]}),
-                timeout=_SIO_TIMEOUT_SECONDS,
-            )
-
-            success: bool = isinstance(response, dict) and response.get("success", False)
-            if success:
-                logger.info(
-                    "Z-Wave value written",
-                    node_id=node_id, cc=command_class,
-                    prop=property_name, value=value,
+            async with websockets.connect(
+                self._url, max_size=_MAX_WS_SIZE, close_timeout=5,
+            ) as ws:
+                # Handshake: version → initialize
+                version_msg = json.loads(
+                    await asyncio.wait_for(ws.recv(), timeout=_WS_TIMEOUT_SECONDS)
                 )
-            else:
-                msg: str = ""
-                if isinstance(response, dict):
-                    msg = response.get("message", str(response))
-                logger.error("Z-Wave writeValue failed", node_id=node_id, response=msg[:200])
-            return success
+                init_id: str = self._next_msg_id()
+                await ws.send(json.dumps({
+                    "messageId": init_id,
+                    "command": "initialize",
+                    "schemaVersion": min(
+                        _SCHEMA_VERSION,
+                        version_msg.get("maxSchemaVersion", _SCHEMA_VERSION),
+                    ),
+                }))
+                await self._recv_for(ws, init_id)
+
+                # Send set_value
+                set_id: str = self._next_msg_id()
+                await ws.send(json.dumps({
+                    "messageId": set_id,
+                    "command": "node.set_value",
+                    "nodeId": node_id,
+                    "valueId": value_id,
+                    "value": value,
+                }))
+                resp: dict[str, Any] = await self._recv_for(ws, set_id)
+
+                success: bool = resp.get("success", False)
+                if success:
+                    logger.info(
+                        "Z-Wave value set",
+                        node_id=node_id, cc=command_class,
+                        prop=property_name, value=value,
+                    )
+                else:
+                    logger.error(
+                        "Z-Wave set_value failed",
+                        node_id=node_id,
+                        error=resp.get("message", str(resp)[:200]),
+                    )
+                return success
 
         except Exception as e:
-            logger.error("Z-Wave writeValue error", error=str(e), node_id=node_id)
+            logger.error("Z-Wave set_value error", error=str(e), node_id=node_id)
             return False
-        finally:
-            if sio.connected:
-                await sio.disconnect()
 
     # ------------------------------------------------------------------
     # Cache accessors
@@ -304,8 +374,8 @@ class ZWaveService:
             if domain is None:
                 continue
 
-            name: str = node.get("name") or node.get("productLabel") or f"Node {node_id}"
-            location: str = node.get("loc", "")
+            name: str = node.get("name") or node.get("label") or f"Node {node_id}"
+            location: str = node.get("location", "")
 
             device_info: dict[str, Any] = {
                 "entity_id": f"{domain}.zwave_node_{node_id}",
@@ -330,40 +400,33 @@ class ZWaveService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_response(response: Any, api_name: str) -> list[dict[str, Any]]:
-        """Parse a Z-Wave JS UI socket.io response into a list of results."""
-        if isinstance(response, dict):
-            if response.get("success"):
-                result: Any = response.get("result", [])
-                return result if isinstance(result, list) else []
-            msg: str = response.get("message", "unknown error")
-            raise ValueError(f"{api_name} failed: {msg}")
-
-        if isinstance(response, list):
-            return response
-
-        raise ValueError(f"{api_name}: unexpected response type {type(response).__name__}")
+    async def _recv_for(ws: Any, message_id: str, max_attempts: int = 50) -> dict[str, Any]:
+        """Read WebSocket messages until we get one matching our message ID."""
+        for _ in range(max_attempts):
+            raw: str = await asyncio.wait_for(ws.recv(), timeout=_WS_TIMEOUT_SECONDS)
+            msg: dict[str, Any] = json.loads(raw)
+            if msg.get("messageId") == message_id:
+                return msg
+        raise ValueError(f"No response for messageId={message_id} after {max_attempts} reads")
 
     @staticmethod
     def _get_node_state_summary(node: dict[str, Any], domain: str) -> str:
         """Extract a human-readable state from cached node values."""
-        values: dict[str, Any] = node.get("values", {})
-        if not isinstance(values, dict):
-            return "unknown"
+        values: list[dict[str, Any]] = _iter_values(node)
 
         if domain == "switch":
-            for val in values.values():
+            for val in values:
                 if val.get("commandClass") == 37 and val.get("property") == "currentValue":
                     return "on" if val.get("value") else "off"
 
         elif domain == "light":
-            for val in values.values():
+            for val in values:
                 if val.get("commandClass") == 38 and val.get("property") == "currentValue":
                     level: int = val.get("value", 0)
                     return "off" if level == 0 else f"on ({level}%)"
 
         elif domain == "lock":
-            for val in values.values():
+            for val in values:
                 if val.get("commandClass") == 98 and val.get("property") == "currentMode":
                     mode: Any = val.get("value")
                     if mode == 255:
@@ -373,14 +436,14 @@ class ZWaveService:
                     return str(mode)
 
         elif domain == "climate":
-            for val in values.values():
+            for val in values:
                 if val.get("commandClass") == 67 and val.get("property") == "setpoint":
                     temp: Any = val.get("value")
                     if temp is not None:
                         return f"setpoint {temp}"
 
         elif domain == "cover":
-            for val in values.values():
+            for val in values:
                 if val.get("commandClass") == 38 and val.get("property") == "currentValue":
                     pos: int = val.get("value", 0)
                     if pos == 0:
@@ -389,5 +452,7 @@ class ZWaveService:
                         return "open"
                     return f"open ({pos}%)"
 
-        status: str = node.get("status", "unknown")
-        return "offline" if status == "dead" else "unknown"
+        status: Any = node.get("status")
+        if status == 0:  # dead
+            return "offline"
+        return "unknown"
