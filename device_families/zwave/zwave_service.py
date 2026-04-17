@@ -34,16 +34,11 @@ except ImportError:
             self._log.debug(msg)
 
 
-try:
-    from services.secret_service import get_secret_value
-except ImportError:
-    import os
-
-    def get_secret_value(key: str, scope: str = "") -> str | None:  # noqa: E302
-        return os.environ.get(key)
-
+from jarvis_command_sdk import JarvisStorage
 
 logger = JarvisLogger(service="device.zwave")
+
+_storage: JarvisStorage = JarvisStorage("zwave")
 
 # Default cache staleness: 5 minutes
 _DEFAULT_MAX_AGE_SECONDS: int = 300
@@ -170,7 +165,7 @@ class ZWaveService:
             return
         self._initialized: bool = True
 
-        self._url: str | None = get_secret_value("ZWAVE_JS_URL", "integration")
+        self._url: str | None = _storage.get_secret("ZWAVE_JS_URL")
 
         # Node cache: node_id → raw node data from Z-Wave JS Server
         self._nodes: dict[int, dict[str, Any]] = {}
