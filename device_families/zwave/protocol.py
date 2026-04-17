@@ -255,7 +255,7 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
         ]
 
     async def discover(self, timeout: int = 5) -> list[DiscoveredDevice]:
-        from device_families.zwave.zwave_service import ZWaveService, classify_node
+        from .zwave_service import ZWaveService, classify_node
 
         service: ZWaveService = ZWaveService()
         await service.refresh_if_stale(max_age_seconds=0)  # Force fresh data
@@ -292,7 +292,7 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
     async def control(
         self, device: DiscoveredDevice, action: str, params: dict[str, Any] | None = None,
     ) -> DeviceControlResult:
-        from device_families.zwave.zwave_service import ZWaveService
+        from .zwave_service import ZWaveService
 
         service: ZWaveService = ZWaveService()
         node_id: int | None = device.extra.get("node_id")
@@ -325,7 +325,7 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
         )
 
     async def get_state(self, device: DiscoveredDevice) -> dict[str, Any]:
-        from device_families.zwave.zwave_service import ZWaveService
+        from .zwave_service import ZWaveService
 
         service: ZWaveService = ZWaveService()
         node_id: int | None = device.extra.get("node_id")
