@@ -356,13 +356,13 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
             )
 
         cc, endpoint, prop, value, prop_key = resolved
-        success: bool = await service.set_value(
+        success, error_msg = await service.set_value(
             node_id, cc, endpoint, prop, value, property_key=prop_key,
         )
 
         return DeviceControlResult(
             success=success, entity_id=device.entity_id, action=action,
-            error=None if success else "Z-Wave writeValue failed",
+            error=error_msg,
         )
 
     async def get_state(self, device: DiscoveredDevice) -> dict[str, Any]:

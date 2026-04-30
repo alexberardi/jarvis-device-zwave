@@ -178,11 +178,11 @@ class ZWaveService:
         if url:
             logger.debug("Z-Wave JS URL resolved", url=url)
         else:
-            logger.debug(
-                "Z-Wave JS URL not found in JarvisStorage",
-                storage_namespace=_storage._namespace,
-                backend_type=type(_storage._backend).__name__ if _storage._backend else "None",
-            )
+            # Don't introspect JarvisStorage internals here — the SDK was
+            # refactored (no more `_namespace` / instance `_backend`) and
+            # this debug log was raising AttributeError that propagated up
+            # as the user-visible "device control failed" error.
+            logger.debug("Z-Wave JS URL not found in JarvisStorage")
         return url
 
     def _next_msg_id(self) -> str:
@@ -307,7 +307,7 @@ class ZWaveService:
         property_name: str,
         value: Any,
         property_key: int | str | None = None,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         """Send a node.set_value command to Z-Wave JS Server.
 
         Args:
@@ -319,18 +319,18 @@ class ZWaveService:
             property_key: Optional property key (needed for thermostat setpoints).
 
         Returns:
-            True on success, False on failure.
+            (True, None) on success, (False, error_message) on failure.
         """
         url: str | None = self._get_url()
         if not url:
             logger.error("ZWAVE_JS_URL not configured")
-            return False
+            return False, "ZWAVE_JS_URL not configured"
 
         try:
             import websockets
         except ImportError:
             logger.error("websockets package not installed")
-            return False
+            return False, "websockets package not installed"
 
         value_id: dict[str, Any] = {
             "commandClass": command_class,
@@ -377,17 +377,19 @@ class ZWaveService:
                         node_id=node_id, cc=command_class,
                         prop=property_name, value=value,
                     )
-                else:
-                    logger.error(
-                        "Z-Wave set_value failed",
-                        node_id=node_id,
-                        error=resp.get("message", str(resp)[:200]),
-                    )
-                return success
+                    return True, None
+
+                error_msg: str = resp.get("message") or str(resp)[:200]
+                logger.error(
+                    "Z-Wave set_value failed",
+                    node_id=node_id,
+                    error=error_msg,
+                )
+                return False, error_msg
 
         except Exception as e:
             logger.error("Z-Wave set_value error", error=str(e), node_id=node_id)
-            return False
+            return False, str(e)
 
     # ------------------------------------------------------------------
     # Cache accessors
