@@ -32,8 +32,13 @@ from jarvis_command_sdk import AgentSchedule, IJarvisAgent, IJarvisSecret, Jarvi
 
 logger = JarvisLogger(service="device.zwave")
 
-# Refresh interval: 5 minutes
-REFRESH_INTERVAL_SECONDS: int = 300
+# Refresh interval: 15 minutes. Each refresh pulls the FULL Z-Wave JS driver
+# state via start_listening and json.loads it — a multi-MB transient (~15 MB
+# observed) every cycle. Z-Wave device lists rarely change, so polling every
+# 5 min just churned the heap (fed glibc fragmentation on the Pi Zero) for no
+# benefit. Control commands (set_value) always connect fresh, so a staler
+# cached node list only delays a newly-added device appearing in voice context.
+REFRESH_INTERVAL_SECONDS: int = 900
 
 
 class ZWaveAgent(IJarvisAgent):

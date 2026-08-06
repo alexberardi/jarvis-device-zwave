@@ -40,8 +40,10 @@ logger = JarvisLogger(service="device.zwave")
 
 _storage: JarvisStorage = JarvisStorage("zwave")
 
-# Default cache staleness: 5 minutes
-_DEFAULT_MAX_AGE_SECONDS: int = 300
+# Default cache staleness: 15 minutes (matches the agent refresh interval).
+# Each refresh re-pulls + parses the full driver state (~15 MB transient), so
+# keep on-demand refetches infrequent. Control commands connect fresh anyway.
+_DEFAULT_MAX_AGE_SECONDS: int = 900
 
 # WebSocket timeout for operations
 _WS_TIMEOUT_SECONDS: int = 30
