@@ -1,7 +1,7 @@
 name: "zwave"
 display_name: "Z-Wave (via Z-Wave JS UI)"
 description: "Z-Wave device control via Z-Wave JS UI. Discovers and controls switches, lights, locks, thermostats, and covers over your Z-Wave mesh."
-version: "1.0.1"
+version: "1.0.2"
 min_jarvis_version: "0.9.0"
 license: Apache-2.0
 author:
