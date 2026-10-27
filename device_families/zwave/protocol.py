@@ -365,18 +365,23 @@ class ZWaveProtocol(IJarvisDeviceProtocol):
             error=error_msg,
         )
 
-    async def get_state(self, device: DiscoveredDevice) -> dict[str, Any]:
-        from .zwave_service import ZWaveService
+    async def get_state(self, ip: Any = "", **kwargs: Any) -> dict[str, Any]:
+        """The SDK's get_state(ip, **kwargs): the node passes entity_id (and cloud_id, ...) as
+        keywords. A DiscoveredDevice in ip (older callers) is read the same way."""
+        from .zwave_service import ZWaveService, classify_node
 
-        service: ZWaveService = ZWaveService()
-        node_id: int | None = device.extra.get("node_id") if device.extra else None
+        device: DiscoveredDevice | None = ip if isinstance(ip, DiscoveredDevice) else None
+        entity_id: str = device.entity_id if device else str(kwargs.get("entity_id") or "")
+        node_id: int | None = device.extra.get("node_id") if device and device.extra else None
         if node_id is None:
-            node_id = _parse_node_id_from_entity(device.entity_id)
+            node_id = _parse_node_id_from_entity(entity_id)
         if node_id is None:
             return {"error": "Missing node_id in device data"}
 
+        service: ZWaveService = ZWaveService()
         node: dict[str, Any] | None = service.get_node(node_id)
         if node is None:
             return {"error": f"Node {node_id} not in cache — run discovery first"}
 
-        return _extract_state(node, device.domain)
+        domain: str | None = device.domain if device else kwargs.get("domain")
+        return _extract_state(node, domain or classify_node(node) or "switch")
